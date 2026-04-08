@@ -239,7 +239,7 @@ class PolymarketClient:
         for chunk in self._chunks(unique_tokens, CLOB_BATCH_TOKEN_IDS):
             params = {
                 "token_ids": ",".join(chunk),
-                "sides": ",".join(["BUY"] * len(chunk)),
+                "side": "BUY",
             }
 
             try:

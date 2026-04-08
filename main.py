@@ -5,7 +5,7 @@ import random
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import schedule
 
@@ -29,6 +29,7 @@ from memory_store import MemoryStore
 from outcome_resolver import OutcomeResolver
 from polymarket_client import PolymarketClient, WeatherMarket
 from risk_manager import RiskManager
+from runtime_needs import RuntimeNeedsEvaluator
 from utils import create_http_session, ensure_db, log_edges_bulk, send_telegram, setup_logging
 from weather_engine import WeatherEngine
 
@@ -45,14 +46,28 @@ class ScannerApp:
         self.executor = TradeExecutor()
         self.memory = MemoryStore()
         self.outcome_resolver = OutcomeResolver()
+        self.needs = RuntimeNeedsEvaluator()
         self.command_session = create_http_session()
         self._scan_lock = threading.Lock()
         self.manual_paused = False
         self.command_offset = 0
         self._last_circuit_alert_at: datetime | None = None
+        self._market_fetch_failures = 0
+        self._market_fetch_cooldown_until: datetime | None = None
         self.scanned_today = 0
         self.alerts_today = 0
         self.last_day = datetime.now(timezone.utc).date()
+        self._startup_report_text = self._apply_runtime_needs()
+
+    def _apply_runtime_needs(self) -> str:
+        report = self.needs.evaluate()
+        text = self.needs.to_text(report)
+        if report.recommendation in {"OFFLINE_SAFE", "PAPER_ONLY"}:
+            self.executor.paper = True
+        if report.recommendation == "OFFLINE_SAFE":
+            self._market_fetch_cooldown_until = datetime.now(timezone.utc) + timedelta(minutes=5)
+        logger.info("Runtime needs report:\n%s", text)
+        return text
 
     def run_scanner(self) -> None:
         self.process_telegram_commands()
@@ -68,11 +83,25 @@ class ScannerApp:
         cycle_start = time.perf_counter()
         logger.info("Starting scanner cycle")
         try:
+            if self._market_fetch_cooldown_until and datetime.now(timezone.utc) < self._market_fetch_cooldown_until:
+                remaining = (self._market_fetch_cooldown_until - datetime.now(timezone.utc)).total_seconds()
+                logger.warning("Skipping scanner due to market fetch cooldown (%.0fs remaining)", max(0.0, remaining))
+                return
             self._roll_daily_counters_if_needed()
             try:
                 markets = self.polymarket.get_active_weather_markets()
+                self._market_fetch_failures = 0
+                self._market_fetch_cooldown_until = None
             except Exception as exc:  # noqa: BLE001
-                logger.exception("Failed fetching active weather markets: %s", exc)
+                self._market_fetch_failures += 1
+                cooldown_seconds = min(900, 20 * (2 ** min(5, self._market_fetch_failures)))
+                self._market_fetch_cooldown_until = datetime.now(timezone.utc) + timedelta(seconds=cooldown_seconds)
+                logger.warning(
+                    "Failed fetching markets (%s). Cooldown %ss. error=%s",
+                    self._market_fetch_failures,
+                    cooldown_seconds,
+                    exc,
+                )
                 return
             logger.info("Scanning %s candidate weather markets", len(markets))
             self.scanned_today += len(markets)
@@ -308,6 +337,7 @@ class ScannerApp:
                     "/status - ringkasan bot\\n"
                     "/equity - equity & pnl harian\\n"
                     "/risk - risk state\\n"
+                    "/needs - runtime requirements check\\n"
                     "/pause - pause scanner\\n"
                     "/resume - resume scanner\\n"
                     "/paper - set paper mode\\n"
@@ -315,6 +345,9 @@ class ScannerApp:
                     "/sync - trigger resolved-outcome sync\\n"
                     "/help - daftar command"
                 )
+            elif lowered == "/needs":
+                needs_text = self.needs.to_text(self.needs.evaluate()).replace("_", "\\_")
+                self._safe_notify(f"🧪 *Runtime Needs*\\n{needs_text}")
             elif lowered == "/equity":
                 self._safe_notify(
                     "💰 *Equity*\\n"
@@ -516,7 +549,9 @@ def main() -> None:
         send_telegram(
             "✅ *Polymarket Weather Bot started*\n"
             f"Scanner aktif tiap 15 menit.\n"
-            f"LLM: `{LLM_PROVIDER}` / `{LLM_MODEL}`"
+            f"LLM: `{LLM_PROVIDER}` / `{LLM_MODEL}`\n"
+            f"Mode: `{'PAPER' if app.executor.paper else 'LIVE'}`\n"
+            f"Needs summary: `{app._startup_report_text.splitlines()[0]}`"
         )
     except Exception as exc:  # noqa: BLE001
         logger.exception("Startup telegram failed: %s", exc)

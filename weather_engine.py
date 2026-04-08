@@ -100,13 +100,14 @@ class WeatherEngine:
     def _fetch_member_maxima_with_fallback_models(self, base_params: dict[str, Any], target_date: str) -> tuple[list[float], float]:
         model_candidates: list[list[str]] = [
             OPEN_METEO_MODELS,
-            ["ecmwf_ifs_025", "gfs_seamless"],
-            ["ecmwf_ifs_025"],
+            ["ecmwf_ifs025", "gfs025"],
+            ["ecmwf_ifs025"],
             ["gfs_seamless"],
+            ["gfs025"],
         ]
 
         for models in model_candidates:
-            params = {**base_params, "models": ",".join(models)}
+            params = {**base_params, "models": models}
             try:
                 payload = self._get_json(params)
                 member_maxima = self._extract_from_hourly_block(payload.get("hourly"), target_date)

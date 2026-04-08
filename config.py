@@ -144,9 +144,8 @@ STATION_HISTORICAL_BIAS_C = _parse_city_bias_map(
 )
 
 OPEN_METEO_MODELS = [
-    # As requested in the blueprint.
-    "ecmwf_ifs_025",
-    "gfs_ensemble_025",
+    "ecmwf_ifs025",
+    "gfs025",
 ]
 
 

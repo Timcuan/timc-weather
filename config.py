@@ -19,6 +19,22 @@ def _sanitize_secret(value: str) -> str:
         return ""
     return secret
 
+
+def _parse_city_bias_map(raw: str) -> dict[str, float]:
+    output: dict[str, float] = {}
+    for item in raw.split(","):
+        if ":" not in item:
+            continue
+        city, delta = item.split(":", 1)
+        city_key = city.strip().lower()
+        if not city_key:
+            continue
+        try:
+            output[city_key] = float(delta.strip())
+        except ValueError:
+            output[city_key] = 0.0
+    return output
+
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 LOG_DIR = DATA_DIR / "logs"
@@ -86,6 +102,7 @@ POLYMARKET_EXCHANGE_ADDRESS = os.getenv("POLYMARKET_EXCHANGE_ADDRESS", "")
 
 STARTING_EQUITY_USD = float(os.getenv("STARTING_EQUITY_USD", "1000"))
 MIN_LLM_CONFIDENCE = float(os.getenv("MIN_LLM_CONFIDENCE", "0.82"))
+KELLY_MIN_FRACTION = float(os.getenv("KELLY_MIN_FRACTION", "0.02"))
 KELLY_MAX_FRACTION = float(os.getenv("KELLY_MAX_FRACTION", "0.04"))
 MAX_POSITION_PER_MARKET_PCT = float(os.getenv("MAX_POSITION_PER_MARKET_PCT", "0.04"))
 DAILY_LOSS_CAP_PCT = float(os.getenv("DAILY_LOSS_CAP_PCT", "0.05"))
@@ -100,6 +117,31 @@ NO_SPREAD_BIN_STEPS = tuple(
 )
 MIN_MARKET_LIQUIDITY_USD = float(os.getenv("MIN_MARKET_LIQUIDITY_USD", "10000"))
 MAX_SIZE_TO_LIQUIDITY_RATIO = float(os.getenv("MAX_SIZE_TO_LIQUIDITY_RATIO", "0.02"))
+MAX_ORDER_SLIPPAGE_PCT = float(os.getenv("MAX_ORDER_SLIPPAGE_PCT", "0.08"))
+
+ENABLE_ADVANCED_ANTI_BLOCK = os.getenv("ENABLE_ADVANCED_ANTI_BLOCK", "true").lower() == "true"
+ADVANCED_SESSION_ROTATE_REQUESTS = int(os.getenv("ADVANCED_SESSION_ROTATE_REQUESTS", "8"))
+ADVANCED_SESSION_ROTATE_MINUTES = int(os.getenv("ADVANCED_SESSION_ROTATE_MINUTES", "10"))
+REQUEST_JITTER_MIN_MS = int(os.getenv("REQUEST_JITTER_MIN_MS", "20"))
+REQUEST_JITTER_MAX_MS = int(os.getenv("REQUEST_JITTER_MAX_MS", "120"))
+ENABLE_PROXY_ROTATION = os.getenv("ENABLE_PROXY_ROTATION", "false").lower() == "true"
+PROXY_URLS = [p.strip() for p in os.getenv("PROXY_URLS", "").split(",") if p.strip()]
+ADVANCED_HEADERS_REFERERS = [
+    r.strip()
+    for r in os.getenv(
+        "ADVANCED_HEADERS_REFERERS",
+        "https://polymarket.com,https://google.com,https://x.com,https://www.wunderground.com",
+    ).split(",")
+    if r.strip()
+]
+
+ELEVATION_LAPSE_RATE_C_PER_M = float(os.getenv("ELEVATION_LAPSE_RATE_C_PER_M", "0.0065"))
+STATION_HISTORICAL_BIAS_C = _parse_city_bias_map(
+    os.getenv(
+        "STATION_HISTORICAL_BIAS_C",
+        "shenzhen:0.0,seoul:0.0,tokyo:0.0,taipei:0.0,hongkong:0.0",
+    )
+)
 
 OPEN_METEO_MODELS = [
     # As requested in the blueprint.

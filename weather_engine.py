@@ -7,31 +7,32 @@ from typing import Any
 
 import numpy as np
 
+from anti_block import AdvancedSessionManager
 from config import (
     OPEN_METEO_ENSEMBLE_URL,
     OPEN_METEO_MODELS,
     REQUEST_TIMEOUT_SECONDS,
     WEATHER_CACHE_TTL_SECONDS,
 )
+from station_bias import build_bias_adjustment
 from station_mapping import get_station_for_city
-from utils import cache_get, cache_set, create_http_session, retry
+from utils import cache_get, cache_set, retry
 
 logger = logging.getLogger(__name__)
 
 
 class WeatherEngine:
     def __init__(self) -> None:
-        self.session = create_http_session()
+        self.http = AdvancedSessionManager()
 
     @retry()
     def _get_json(self, params: dict[str, Any]) -> Any:
-        response = self.session.get(
+        return self.http.request_json(
+            "GET",
             OPEN_METEO_ENSEMBLE_URL,
             params=params,
             timeout=REQUEST_TIMEOUT_SECONDS,
         )
-        response.raise_for_status()
-        return response.json()
 
     def get_bin_probabilities(self, city_key: str, target_date: str, precision: float = 1.0) -> dict[str, Any]:
         station = get_station_for_city(city_key)
@@ -50,12 +51,22 @@ class WeatherEngine:
             "timezone": "UTC",
             "hourly": "temperature_2m",
         }
-        member_maxima = self._fetch_member_maxima_with_fallback_models(hourly_params, target_date)
+        member_maxima, source_model_elevation = self._fetch_member_maxima_with_fallback_models(hourly_params, target_date)
 
         if not member_maxima:
             raise RuntimeError(f"No ensemble members parsed for {city_key} {target_date}")
 
-        bins = [self._to_temperature_bin(temp_c, precision) for temp_c in member_maxima]
+        adjustments = [
+            build_bias_adjustment(
+                city_key=city_key,
+                raw_temperature_c=temp_c,
+                model_elevation_m=source_model_elevation,
+                station_elevation_m=station.elevation,
+            )
+            for temp_c in member_maxima
+        ]
+        corrected_maxima = [adj.adjusted_temperature_c for adj in adjustments]
+        bins = [self._to_temperature_bin(temp_c, precision) for temp_c in corrected_maxima]
         counter = Counter(bins)
         total_members = sum(counter.values())
 
@@ -72,13 +83,21 @@ class WeatherEngine:
             "model_prob": float(model_prob),
             "all_probs": all_probs,
             "total_members": int(total_members),
-            "member_maxima": [float(x) for x in member_maxima],
+            "member_maxima_raw": [float(x) for x in member_maxima],
+            "member_maxima_corrected": [float(x) for x in corrected_maxima],
+            "bias_summary": {
+                "model_elevation_m": float(source_model_elevation),
+                "station_elevation_m": float(station.elevation),
+                "avg_elevation_delta_c": float(np.mean([adj.elevation_delta_c for adj in adjustments])),
+                "avg_historical_delta_c": float(np.mean([adj.historical_delta_c for adj in adjustments])),
+                "avg_total_delta_c": float(np.mean([adj.total_delta_c for adj in adjustments])),
+            },
             "precision": precision,
         }
         cache_set(cache_key, result, WEATHER_CACHE_TTL_SECONDS)
         return result
 
-    def _fetch_member_maxima_with_fallback_models(self, base_params: dict[str, Any], target_date: str) -> list[float]:
+    def _fetch_member_maxima_with_fallback_models(self, base_params: dict[str, Any], target_date: str) -> tuple[list[float], float]:
         model_candidates: list[list[str]] = [
             OPEN_METEO_MODELS,
             ["ecmwf_ifs_025", "gfs_seamless"],
@@ -92,11 +111,22 @@ class WeatherEngine:
                 payload = self._get_json(params)
                 member_maxima = self._extract_from_hourly_block(payload.get("hourly"), target_date)
                 if member_maxima:
-                    return member_maxima
+                    model_elevation = self._extract_model_elevation(payload)
+                    return member_maxima, model_elevation
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Open-Meteo fetch failed for models=%s: %s", models, exc)
                 continue
-        return []
+        return [], 0.0
+
+    def _extract_model_elevation(self, payload: Any) -> float:
+        if isinstance(payload, dict):
+            value = payload.get("elevation")
+            try:
+                if value is not None:
+                    return float(value)
+            except (TypeError, ValueError):
+                return 0.0
+        return 0.0
 
     def _extract_member_maxima_for_date(self, payload: Any, target_date: str) -> list[float]:
         values: list[float] = []

@@ -147,7 +147,7 @@ class LLMDecisionEngine:
 
         cfg = types.GenerateContentConfig(
             system_instruction=GEMINI_SYSTEM_PROMPT,
-            temperature=LLM_TEMPERATURE,
+            temperature=min(0.3, max(0.2, LLM_TEMPERATURE)),
             top_p=LLM_TOP_P,
             top_k=LLM_TOP_K,
             max_output_tokens=LLM_MAX_OUTPUT_TOKENS,
@@ -166,6 +166,7 @@ class LLMDecisionEngine:
                 decision = parsed
             else:
                 decision = TradingDecision.model_validate(parsed)
+            decision = self._self_critique_decision(decision, context)
             return self._normalize_decision(decision, context)
 
         text = (getattr(response, "text", "") or "").strip()
@@ -173,6 +174,7 @@ class LLMDecisionEngine:
             raise RuntimeError("Gemini returned empty response text")
         data = json.loads(text)
         decision = TradingDecision.model_validate(data)
+        decision = self._self_critique_decision(decision, context)
         return self._normalize_decision(decision, context)
 
     def _build_user_prompt(self, context: dict[str, Any]) -> str:
@@ -350,8 +352,64 @@ class LLMDecisionEngine:
             reason="Fallback rules decision",
             risk_notes="non-LLM deterministic fallback",
         )
+        output = self._self_critique_decision(output, context)
         output = self._normalize_decision(output, context)
         return self._to_decision(output, context)
+
+    def _self_critique_decision(self, output: TradingDecision, context: dict[str, Any]) -> TradingDecision:
+        edge = float(context.get("edge", 0.0))
+        model_prob = float(context.get("model_prob", 0.0))
+        market_price = float(context.get("market_price", 1.0))
+        liquidity = float(context.get("liquidity", 0.0))
+        near_resolution = bool(context.get("near_resolution", False))
+
+        if output.action == "SKIP":
+            return output
+
+        if edge < EDGE_MIN:
+            return TradingDecision(
+                action="SKIP",
+                target_bin=output.target_bin,
+                size_usdc=0.0,
+                insurance_pct=0.0,
+                confidence=min(output.confidence, MIN_LLM_CONFIDENCE - 0.01),
+                reason="Self-critique veto: edge below threshold",
+                risk_notes=output.risk_notes,
+            )
+
+        if model_prob < 0.70 or market_price > 0.08:
+            return TradingDecision(
+                action="SKIP",
+                target_bin=output.target_bin,
+                size_usdc=0.0,
+                insurance_pct=0.0,
+                confidence=min(output.confidence, MIN_LLM_CONFIDENCE - 0.01),
+                reason="Self-critique veto: core model/price rule failed",
+                risk_notes=output.risk_notes,
+            )
+
+        if liquidity <= 0:
+            return TradingDecision(
+                action="SKIP",
+                target_bin=output.target_bin,
+                size_usdc=0.0,
+                insurance_pct=0.0,
+                confidence=min(output.confidence, MIN_LLM_CONFIDENCE - 0.01),
+                reason="Self-critique veto: missing liquidity data",
+                risk_notes=output.risk_notes,
+            )
+
+        if not near_resolution and output.confidence < 0.84:
+            return TradingDecision(
+                action="SKIP",
+                target_bin=output.target_bin,
+                size_usdc=0.0,
+                insurance_pct=0.0,
+                confidence=min(output.confidence, 0.81),
+                reason="Self-critique veto: confidence too low for non-near-resolution market",
+                risk_notes=output.risk_notes,
+            )
+        return output
 
     def _normalize_decision(self, output: TradingDecision, context: dict[str, Any]) -> TradingDecision:
         edge = float(context.get("edge", 0.0))

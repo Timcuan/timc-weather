@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
+from anti_block import AdvancedSessionManager
 from config import (
     CACHE_TTL_SECONDS,
     CLOB_BATCH_TOKEN_IDS,
@@ -17,7 +18,7 @@ from config import (
     REQUEST_TIMEOUT_SECONDS,
     TARGET_CITIES,
 )
-from utils import cache_get, cache_set, create_http_session, retry
+from utils import cache_get, cache_set, retry
 
 logger = logging.getLogger(__name__)
 
@@ -38,13 +39,16 @@ class WeatherMarket:
 
 class PolymarketClient:
     def __init__(self) -> None:
-        self.session = create_http_session()
+        self.http = AdvancedSessionManager()
 
     @retry()
     def _get_json(self, url: str, params: dict[str, Any] | None = None) -> Any:
-        response = self.session.get(url, params=params, timeout=REQUEST_TIMEOUT_SECONDS)
-        response.raise_for_status()
-        return response.json()
+        return self.http.request_json(
+            "GET",
+            url,
+            params=params,
+            timeout=REQUEST_TIMEOUT_SECONDS,
+        )
 
     def get_active_weather_markets(self) -> list[WeatherMarket]:
         cache_key = "gamma:active_weather_markets"

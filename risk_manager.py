@@ -8,6 +8,7 @@ from config import (
     CIRCUIT_BREAKER_CONSECUTIVE_LOSSES,
     CIRCUIT_BREAKER_PAUSE_HOURS,
     DAILY_LOSS_CAP_PCT,
+    KELLY_MIN_FRACTION,
     KELLY_MAX_FRACTION,
     MAX_SIZE_TO_LIQUIDITY_RATIO,
     MAX_POSITION_PER_MARKET_PCT,
@@ -29,6 +30,7 @@ class RiskManager:
     def __init__(self) -> None:
         self.equity_usd = STARTING_EQUITY_USD
         self.realized_pnl_today = 0.0
+        self.day_start_equity_usd = STARTING_EQUITY_USD
         self.consecutive_losses = 0
         self.pause_until: datetime | None = None
         self._pnl_day = datetime.now(timezone.utc).date()
@@ -44,7 +46,8 @@ class RiskManager:
         if llm_conf < MIN_LLM_CONFIDENCE:
             return RiskDecision(False, "llm confidence below threshold", 0.0, 0.0)
 
-        if self.realized_pnl_today <= -(self.equity_usd * DAILY_LOSS_CAP_PCT):
+        daily_loss_limit = self.day_start_equity_usd * DAILY_LOSS_CAP_PCT
+        if self.realized_pnl_today <= -daily_loss_limit:
             return RiskDecision(False, "daily loss cap reached", 0.0, 0.0)
 
         model_prob = float(candidate.get("model_prob", 0.0))
@@ -62,6 +65,8 @@ class RiskManager:
         q = 1.0 - model_prob
         raw_kelly = max(0.0, (b * model_prob - q) / b) if b > 0 else 0.0
         kelly_fraction = min(raw_kelly, KELLY_MAX_FRACTION, MAX_POSITION_PER_MARKET_PCT)
+        if kelly_fraction < KELLY_MIN_FRACTION:
+            return RiskDecision(False, "kelly below minimum threshold", 0.0, 0.0)
 
         if kelly_fraction <= 0:
             return RiskDecision(False, "kelly <= 0", 0.0, 0.0)
@@ -93,5 +98,6 @@ class RiskManager:
         if today == self._pnl_day:
             return
         self._pnl_day = today
+        self.day_start_equity_usd = self.equity_usd
         self.realized_pnl_today = 0.0
         self.consecutive_losses = 0

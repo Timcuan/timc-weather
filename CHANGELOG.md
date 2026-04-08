@@ -2,6 +2,41 @@
 
 All notable changes to this project are documented in this file.
 
+## [2.3.0] - 2026-04-08
+
+### Added
+- `anti_block.py` with `AdvancedSessionManager`:
+  - real-browser user-agent rotation (`fake-useragent` + fallback pool),
+  - full header rotation,
+  - request jitter,
+  - session rotation by request count/time,
+  - optional proxy rotation.
+
+### Changed
+- Integrated advanced anti-block session manager into:
+  - `polymarket_client.py` (Gamma/CLOB),
+  - `weather_engine.py` (Open-Meteo).
+- Upgraded station-bias pipeline:
+  - implemented `station_bias.py`,
+  - weather ensemble maxima now corrected using elevation + historical station bias before binning.
+- Hardened Gemini decisioning:
+  - temperature clamped to 0.2-0.3,
+  - added self-critique veto gate for unsafe decisions.
+- Strengthened risk sizing:
+  - added `KELLY_MIN_FRACTION`,
+  - daily loss cap now anchored to day-start equity.
+- Upgraded execution path:
+  - added `execute_trade()` path,
+  - pre-trade live quote check,
+  - per-order slippage guard for live execution.
+
+### Fixed
+- Reduced risk of degraded execution during unstable market conditions via slippage skip logic.
+- Improved resilience against endpoint-level soft throttling and fingerprint reuse by rotating HTTP session identity.
+
+### Dependencies
+- Added `fake-useragent`.
+
 ## [2.2.0] - 2026-04-08
 
 ### Added
@@ -27,4 +62,3 @@ All notable changes to this project are documented in this file.
 
 ### Security
 - Added `.gitignore` for secrets and runtime artifacts (`.env`, sqlite DBs, logs, vector DB, `.venv`).
-

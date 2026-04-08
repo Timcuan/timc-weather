@@ -3,7 +3,15 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from config import CLOB_BASE_URL, PAPER_TRADING, POLYMARKET_PROXY_ADDRESS, PRIVATE_KEY
+from anti_block import AdvancedSessionManager
+from config import (
+    CLOB_BASE_URL,
+    MAX_ORDER_SLIPPAGE_PCT,
+    PAPER_TRADING,
+    POLYMARKET_PROXY_ADDRESS,
+    PRIVATE_KEY,
+    REQUEST_TIMEOUT_SECONDS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -12,6 +20,7 @@ class TradeExecutor:
     def __init__(self) -> None:
         self.paper = PAPER_TRADING
         self.live_ready = False
+        self.http = AdvancedSessionManager()
         self.client: Any | None = None
         self.order_type_fok: Any | None = None
         self.market_order_args_cls: Any | None = None
@@ -63,6 +72,22 @@ class TradeExecutor:
         position_size_usd: float,
         include_no_spread: bool,
     ) -> dict[str, Any]:
+        return self.execute_trade(
+            market=market,
+            edge=edge,
+            market_prices=market_prices,
+            position_size_usd=position_size_usd,
+            include_no_spread=include_no_spread,
+        )
+
+    def execute_trade(
+        self,
+        market: Any,
+        edge: Any,
+        market_prices: dict[str, float],
+        position_size_usd: float,
+        include_no_spread: bool,
+    ) -> dict[str, Any]:
         plan = self._build_plan(market, edge, market_prices, position_size_usd, include_no_spread)
 
         if self.paper:
@@ -95,6 +120,18 @@ class TradeExecutor:
                 continue
 
             try:
+                live_price = self._fetch_live_price(token_id, order_type=str(order.get("type", "YES")))
+                if not self._passes_slippage_check(order, live_price):
+                    executions.append(
+                        {
+                            "outcome": order.get("outcome"),
+                            "status": "skipped_slippage",
+                            "snapshot_price": order.get("price"),
+                            "live_price": live_price,
+                        }
+                    )
+                    continue
+
                 order_side = self.buy_constant if order.get("type") == "YES" else self.sell_constant
                 market_order = self.market_order_args_cls(
                     token_id=token_id,
@@ -107,6 +144,9 @@ class TradeExecutor:
                 executions.append(
                     {
                         "outcome": order.get("outcome"),
+                        "amount_usd": amount_usd,
+                        "snapshot_price": order.get("price"),
+                        "live_price": live_price,
                         "status": "submitted",
                         "response": resp,
                     }
@@ -115,6 +155,7 @@ class TradeExecutor:
                 executions.append(
                     {
                         "outcome": order.get("outcome"),
+                        "amount_usd": amount_usd,
                         "status": "error",
                         "error": str(exc),
                     }
@@ -130,6 +171,46 @@ class TradeExecutor:
             "orders": plan,
             "executions": executions,
         }
+
+    def _fetch_live_price(self, token_id: str, order_type: str) -> float | None:
+        side = "BUY" if order_type == "YES" else "SELL"
+        try:
+            payload = self.http.request_json(
+                "GET",
+                f"{CLOB_BASE_URL}/price",
+                params={"token_id": token_id, "side": side},
+                timeout=REQUEST_TIMEOUT_SECONDS,
+            )
+            if isinstance(payload, dict) and payload.get("price") is not None:
+                return float(payload["price"])
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed fetching live price for token=%s side=%s: %s", token_id, side, exc)
+        return None
+
+    def _passes_slippage_check(self, order: dict[str, Any], live_price: float | None) -> bool:
+        snapshot_price_raw = order.get("price")
+        if live_price is None:
+            return True
+        if snapshot_price_raw is None:
+            return True
+        try:
+            snapshot_price = float(snapshot_price_raw)
+        except (TypeError, ValueError):
+            return True
+        if snapshot_price <= 0:
+            return True
+        max_allowed = snapshot_price * (1.0 + MAX_ORDER_SLIPPAGE_PCT)
+        if live_price > max_allowed:
+            logger.warning(
+                "Slippage guard triggered outcome=%s type=%s snapshot=%.4f live=%.4f max=%.4f",
+                order.get("outcome"),
+                order.get("type"),
+                snapshot_price,
+                live_price,
+                max_allowed,
+            )
+            return False
+        return True
 
     def _build_plan(
         self,

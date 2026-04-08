@@ -11,3 +11,4 @@ pandas
 numpy
 requests
 google-genai
+fake-useragent

@@ -1,0 +1,11 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+
+data/cache.sqlite
+data/trades.sqlite
+data/vector_db/
+data/logs/
+
+.DS_Store

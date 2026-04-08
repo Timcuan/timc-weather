@@ -1,0 +1,13 @@
+py-clob-client
+langgraph
+langchain
+langchain-anthropic
+pydantic
+chromadb
+python-dotenv
+schedule
+python-telegram-bot
+pandas
+numpy
+requests
+google-genai

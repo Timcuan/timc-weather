@@ -1,0 +1,23 @@
+[Unit]
+Description=Polymarket Weather Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=%i
+WorkingDirectory=/opt/polymarket-weather-bot
+ExecStart=/opt/polymarket-weather-bot/.venv/bin/python /opt/polymarket-weather-bot/main.py
+Restart=always
+RestartSec=10
+Environment=PYTHONUNBUFFERED=1
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/polymarket-weather-bot/data /opt/polymarket-weather-bot
+
+[Install]
+WantedBy=multi-user.target

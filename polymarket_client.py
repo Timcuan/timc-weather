@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -12,11 +13,15 @@ from config import (
     CACHE_TTL_SECONDS,
     CLOB_BATCH_TOKEN_IDS,
     CLOB_BASE_URL,
+    CLOB_PRICE_WORKERS,
+    CLOB_USE_BATCH_ENDPOINT,
     GAMMA_BASE_URL,
+    GAMMA_MAX_PAGES,
     GAMMA_PAGE_LIMIT,
     MAX_MARKETS_TO_SCAN,
     REQUEST_TIMEOUT_SECONDS,
     TARGET_CITIES,
+    TOKEN_PRICE_CACHE_TTL_SECONDS,
 )
 from utils import cache_get, cache_set, create_http_session, retry
 
@@ -41,6 +46,7 @@ class PolymarketClient:
     def __init__(self) -> None:
         self.http = AdvancedSessionManager()
         self.basic_session = create_http_session()
+        self._batch_prices_allowed = CLOB_USE_BATCH_ENDPOINT
 
     @retry()
     def _get_json(self, url: str, params: dict[str, Any] | None = None) -> Any:
@@ -65,8 +71,9 @@ class PolymarketClient:
 
         markets: list[WeatherMarket] = []
         offset = 0
+        pages_scanned = 0
 
-        while len(markets) < MAX_MARKETS_TO_SCAN:
+        while len(markets) < MAX_MARKETS_TO_SCAN and pages_scanned < GAMMA_MAX_PAGES:
             params = {
                 "limit": GAMMA_PAGE_LIMIT,
                 "offset": offset,
@@ -75,6 +82,7 @@ class PolymarketClient:
                 "archived": "false",
             }
             data = self._get_json(f"{GAMMA_BASE_URL}/markets", params=params)
+            pages_scanned += 1
             if not isinstance(data, list) or not data:
                 break
 
@@ -89,6 +97,12 @@ class PolymarketClient:
                 break
             offset += GAMMA_PAGE_LIMIT
 
+        if pages_scanned >= GAMMA_MAX_PAGES and len(markets) < MAX_MARKETS_TO_SCAN:
+            logger.info(
+                "Stopped Gamma paging at GAMMA_MAX_PAGES=%s with %s weather markets found",
+                GAMMA_MAX_PAGES,
+                len(markets),
+            )
         cache_set(cache_key, [market.__dict__ for market in markets], CACHE_TTL_SECONDS)
         logger.info("Fetched %s weather markets", len(markets))
         return markets
@@ -236,20 +250,60 @@ class PolymarketClient:
             return {}
 
         token_to_price: dict[str, float] = {}
-        for chunk in self._chunks(unique_tokens, CLOB_BATCH_TOKEN_IDS):
-            params = {
-                "token_ids": ",".join(chunk),
-                "side": "BUY",
-            }
 
+        missing_tokens: list[str] = []
+        for token_id in unique_tokens:
+            cached = cache_get(f"clob:price:{token_id}")
+            if cached is None:
+                missing_tokens.append(token_id)
+                continue
             try:
-                data = self._get_json(f"{CLOB_BASE_URL}/prices", params=params)
-                token_to_price.update(self._parse_prices_response(data))
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("Batch /prices failed for %s tokens, fallback to /price: %s", len(chunk), exc)
-                token_to_price.update(self._fetch_prices_fallback(chunk))
+                token_to_price[token_id] = float(cached)
+            except (TypeError, ValueError):
+                missing_tokens.append(token_id)
+
+        if not missing_tokens:
+            return token_to_price
+
+        unresolved = list(missing_tokens)
+        if self._batch_prices_allowed:
+            unresolved = self._fetch_with_batch_endpoint(missing_tokens, token_to_price)
+
+        if unresolved:
+            token_to_price.update(self._fetch_prices_fallback(unresolved))
 
         return token_to_price
+
+    def _fetch_with_batch_endpoint(
+        self,
+        token_ids: list[str],
+        sink: dict[str, float],
+    ) -> list[str]:
+        unresolved: list[str] = []
+        for chunk in self._chunks(token_ids, CLOB_BATCH_TOKEN_IDS):
+            params: list[tuple[str, str]] = [("side", "buy")]
+            params.extend(("token_ids", token_id) for token_id in chunk)
+            try:
+                data = self._get_json(f"{CLOB_BASE_URL}/prices", params=params)
+                chunk_prices = self._parse_prices_response(data)
+                if not chunk_prices:
+                    raise RuntimeError("empty /prices payload")
+                for token_id, price in chunk_prices.items():
+                    sink[token_id] = float(price)
+                    cache_set(f"clob:price:{token_id}", float(price), TOKEN_PRICE_CACHE_TTL_SECONDS)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Batch /prices failed for %s tokens: %s", len(chunk), exc)
+                unresolved.extend(chunk)
+                self._batch_prices_allowed = False
+                break
+
+        if not self._batch_prices_allowed:
+            # If endpoint contract changes or gets blocked, keep runtime on stable per-token path.
+            for token_id in token_ids:
+                if token_id not in sink and token_id not in unresolved:
+                    unresolved.append(token_id)
+
+        return unresolved
 
     def _parse_prices_response(self, payload: Any) -> dict[str, float]:
         if isinstance(payload, dict):
@@ -280,17 +334,39 @@ class PolymarketClient:
 
     def _fetch_prices_fallback(self, token_ids: list[str]) -> dict[str, float]:
         prices: dict[str, float] = {}
-        for token_id in token_ids:
+        if not token_ids:
+            return prices
+
+        max_workers = max(1, min(CLOB_PRICE_WORKERS, len(token_ids)))
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = {
+                pool.submit(self._fetch_single_token_price, token_id): token_id
+                for token_id in token_ids
+            }
+            for future in as_completed(futures):
+                token_id = futures[future]
+                try:
+                    price = future.result()
+                except Exception:  # noqa: BLE001
+                    continue
+                if price is None:
+                    continue
+                prices[token_id] = price
+                cache_set(f"clob:price:{token_id}", float(price), TOKEN_PRICE_CACHE_TTL_SECONDS)
+        return prices
+
+    def _fetch_single_token_price(self, token_id: str) -> float | None:
+        for side in ("buy", "BUY"):
             try:
                 data = self._get_json(
                     f"{CLOB_BASE_URL}/price",
-                    params={"token_id": token_id, "side": "BUY"},
+                    params={"token_id": token_id, "side": side},
                 )
-                if isinstance(data, dict) and "price" in data:
-                    prices[token_id] = float(data["price"])
+                if isinstance(data, dict) and data.get("price") is not None:
+                    return float(data["price"])
             except Exception:  # noqa: BLE001
                 continue
-        return prices
+        return None
 
     def _chunks(self, values: list[str], size: int) -> list[list[str]]:
         return [values[i : i + size] for i in range(0, len(values), size)]

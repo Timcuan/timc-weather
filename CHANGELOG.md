@@ -2,6 +2,22 @@
 
 All notable changes to this project are documented in this file.
 
+## [2.3.1] - 2026-04-08
+
+### Fixed
+- Hardened CLOB price ingestion for 24/7 runtime:
+  - added token-level cache for live quotes,
+  - added concurrent per-token `/price` fallback path,
+  - added automatic runtime disable for unstable `/prices` batch endpoint.
+
+### Changed
+- Added config toggles:
+  - `CLOB_USE_BATCH_ENDPOINT`,
+  - `CLOB_PRICE_WORKERS`,
+  - `TOKEN_PRICE_CACHE_TTL_SECONDS`.
+- Added `GAMMA_MAX_PAGES` guard to cap scanner pagination latency per cycle.
+- Updated `.env.example` and README for stable production defaults.
+
 ## [2.3.0] - 2026-04-08
 
 ### Added

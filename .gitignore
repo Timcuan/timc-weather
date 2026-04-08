@@ -4,8 +4,11 @@ __pycache__/
 *.pyc
 
 data/cache.sqlite
+data/cache.sqlite-shm
+data/cache.sqlite-wal
 data/trades.sqlite
 data/vector_db/
 data/logs/
 
 .DS_Store
+**/.DS_Store

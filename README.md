@@ -57,6 +57,10 @@ LLM_MODEL=gemini-2.5-pro
 LLM_API_KEY=...
 LLM_REQUEST_TIMEOUT_SECONDS=12
 LLM_HTTP_RETRY_ATTEMPTS=1
+CLOB_USE_BATCH_ENDPOINT=false
+CLOB_PRICE_WORKERS=12
+TOKEN_PRICE_CACHE_TTL_SECONDS=30
+GAMMA_MAX_PAGES=12
 ```
 
 4. Jalankan bot:
@@ -94,9 +98,10 @@ Catatan: command hanya diproses dari `TELEGRAM_ADMIN_IDS`.
 
 ## Catatan Implementasi
 
-- Resolver station airport masih **fase 1** (pakai lat/lon kota)
-- `station_bias.py` disiapkan untuk phase 2 bias correction
+- Station mapping menggunakan airport/observatory (`station_mapping.py`)
+- `station_bias.py` aktif untuk correction elevation + historical bias
 - Parser response Open-Meteo dibuat defensif karena variasi format antar model/member
+- Untuk reliability 24/7, default fetch harga CLOB memakai jalur `/price` per-token (concurrent + cache); endpoint batch `/prices` bisa diaktifkan via `CLOB_USE_BATCH_ENDPOINT=true` jika endpoint stabil.
 
 ## Tuning Threshold
 

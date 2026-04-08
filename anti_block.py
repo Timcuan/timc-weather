@@ -58,7 +58,15 @@ class AdvancedSessionManager:
 
     def request_json(self, method: str, url: str, **kwargs: Any) -> Any:
         response = self.request(method, url, **kwargs)
-        return response.json()
+        response.raise_for_status()
+        try:
+            return response.json()
+        except ValueError:
+            # Fallback pair: retry once using basic headers/session profile.
+            self._rotate_session(force=True, basic_profile=True)
+            response = self.request(method, url, **kwargs)
+            response.raise_for_status()
+            return response.json()
 
     def request(self, method: str, url: str, **kwargs: Any) -> requests.Response:
         self._maybe_rotate_session()
@@ -97,7 +105,7 @@ class AdvancedSessionManager:
         if self._requests_in_session >= self.rotate_every_requests or age_minutes >= self.rotate_every_minutes:
             self._rotate_session(force=True)
 
-    def _rotate_session(self, force: bool = False) -> None:
+    def _rotate_session(self, force: bool = False, basic_profile: bool = False) -> None:
         if not force and self._session is not None:
             return
 
@@ -108,7 +116,7 @@ class AdvancedSessionManager:
                 pass
 
         session = requests.Session()
-        session.headers.update(self._build_headers())
+        session.headers.update(self._build_basic_headers() if basic_profile else self._build_headers())
         adapter = HTTPAdapter(
             pool_connections=30,
             pool_maxsize=30,
@@ -168,6 +176,14 @@ class AdvancedSessionManager:
             "Sec-Fetch-Site": sec_fetch_site,
         }
 
+    def _build_basic_headers(self) -> dict[str, str]:
+        return {
+            "User-Agent": USER_AGENT,
+            "Accept": "application/json",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Connection": "keep-alive",
+        }
+
     def _pick_user_agent(self) -> str:
         if not self.enabled:
             return USER_AGENT
@@ -193,4 +209,3 @@ class AdvancedSessionManager:
         if random.random() < 0.08:
             base_ms += random.uniform(100, 400)
         time.sleep(base_ms / 1000.0)
-

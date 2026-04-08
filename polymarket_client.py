@@ -18,7 +18,7 @@ from config import (
     REQUEST_TIMEOUT_SECONDS,
     TARGET_CITIES,
 )
-from utils import cache_get, cache_set, retry
+from utils import cache_get, cache_set, create_http_session, retry
 
 logger = logging.getLogger(__name__)
 
@@ -40,15 +40,22 @@ class WeatherMarket:
 class PolymarketClient:
     def __init__(self) -> None:
         self.http = AdvancedSessionManager()
+        self.basic_session = create_http_session()
 
     @retry()
     def _get_json(self, url: str, params: dict[str, Any] | None = None) -> Any:
-        return self.http.request_json(
-            "GET",
-            url,
-            params=params,
-            timeout=REQUEST_TIMEOUT_SECONDS,
-        )
+        try:
+            return self.http.request_json(
+                "GET",
+                url,
+                params=params,
+                timeout=REQUEST_TIMEOUT_SECONDS,
+            )
+        except Exception as adv_exc:  # noqa: BLE001
+            logger.warning("Advanced session failed, fallback to basic session: %s", adv_exc)
+            response = self.basic_session.get(url, params=params, timeout=REQUEST_TIMEOUT_SECONDS)
+            response.raise_for_status()
+            return response.json()
 
     def get_active_weather_markets(self) -> list[WeatherMarket]:
         cache_key = "gamma:active_weather_markets"
